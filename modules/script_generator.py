@@ -34,27 +34,59 @@ RESPOND IN THIS EXACT JSON FORMAT:
   "keywords": ["keyword one", "keyword two", "keyword three", "keyword four"]
 }}"""
 
+TR_SYSTEM_PROMPT = """Sen kısa video içerikleri (TikTok, Reels, YouTube Shorts) için karanlık hikaye uzmanısın.
+Senaryoların sürükleyici, gizemli ve gerilim doludur.
+Her cümle izleyiciyi ekrana kilitlemelidir."""
 
-def generate_script(topic: str, api_key: str) -> dict:
+TR_USER_PROMPT_TEMPLATE = """Şu konu hakkında 40 saniyelik sürükleyici bir Türkçe senaryo yaz: "{topic}"
+
+KESIN KURALLAR:
+- Cümle başına maksimum 8 kelime. Uzun fikirleri iki cümleye böl.
+- Baştan sona karanlık, gizemli, gerilimli ton
+- İlk cümle mutlaka izleyiciyi kilitleyen bir kanca olmalı
+- Soru yok. Dolgu kelimesi yok. "Bu videoda..." yok.
+- Yalnızca saf anlatım ya da rahatsız edici gerçekler
+- Senaryoyu YALNIZCA TÜRKÇE yaz
+
+Ayrıca Pexels'ta stok görüntü aramak için 4-6 görsel anahtar kelime çıkar.
+Anahtar kelimeler somut ve görsel olmalı (ör. "dark alley", "car crash", "hacker keyboard").
+Anahtar kelimeler MUTLAKA İNGİLİZCE olsun (Pexels için).
+
+AYNEN BU JSON FORMATINDA CEVAP VER:
+{{
+  "script": "İlk güçlü Türkçe cümle. İkinci cümle. Hikayeye devam et. Karanlık tut.",
+  "keywords": ["keyword one", "keyword two", "keyword three", "keyword four"]
+}}"""
+
+
+def generate_script(topic: str, api_key: str, language: str = "en") -> dict:
     """
     Generate a dark 40-second script and visual keywords using GPT-4o.
 
     Args:
-        topic:   The subject of the video (e.g. "car crash conspiracy").
-        api_key: OpenAI API key.
+        topic:    The subject of the video (e.g. "car crash conspiracy").
+        api_key:  OpenAI API key.
+        language: "en" (default) or "tr" for Turkish output.
 
     Returns:
         dict with keys "script" (str) and "keywords" (list[str]).
     """
     client = OpenAI(api_key=api_key)
 
-    logger.info(f"Generating script for topic: '{topic}'")
+    if language == "tr":
+        system_prompt = TR_SYSTEM_PROMPT
+        user_prompt   = TR_USER_PROMPT_TEMPLATE.format(topic=topic)
+    else:
+        system_prompt = SYSTEM_PROMPT
+        user_prompt   = USER_PROMPT_TEMPLATE.format(topic=topic)
+
+    logger.info(f"Generating [{language.upper()}] script for topic: '{topic}'")
 
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_PROMPT_TEMPLATE.format(topic=topic)},
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
         ],
         response_format={"type": "json_object"},
         temperature=0.92,

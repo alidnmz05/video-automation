@@ -41,6 +41,7 @@
     "viral_threshold": 0.8,
     "vph_alert_ratio": 1.5,
     "vph_window_hours": 12,
-    "default_style": "dark_mystery"
+    "default_style": "dark_mystery",
+    "default_lang": "en"
   }
 }

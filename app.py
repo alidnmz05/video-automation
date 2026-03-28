@@ -169,7 +169,7 @@ STEP_NAMES = [
 ]
 
 
-def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, style: str = "dark_mystery") -> None:
+def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, style: str = "dark_mystery", language: str = "en") -> None:
     """
     Runs the full 5-step pipeline in a background thread.
     Writes progress into `state` dict and logs into `log_q`.
@@ -195,7 +195,7 @@ def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, sty
         # Step 1 — Script
         step(1)
         from modules.script_generator import generate_script
-        result   = generate_script(topic, config["api_keys"]["openai"])
+        result   = generate_script(topic, config["api_keys"]["openai"], language=language)
         script   = result["script"]
         keywords = result["keywords"]
         (session_dir / "script.txt").write_text(script, encoding="utf-8")
@@ -205,12 +205,13 @@ def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, sty
         # Step 2 — Voiceover
         step(2)
         from modules.voiceover import generate_voiceover
+        el_cfg = config.get("elevenlabs_tr", config["elevenlabs"]) if language == "tr" else config["elevenlabs"]
         audio_path = generate_voiceover(
             script,
             str(session_dir),
             config["api_keys"]["elevenlabs"],
-            config["elevenlabs"]["voice_id"],
-            config["elevenlabs"]["model_id"],
+            el_cfg["voice_id"],
+            el_cfg["model_id"],
         )
 
         # Step 3 — Subtitles
@@ -226,7 +227,7 @@ def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, sty
         # Step 5 — Assemble
         step(5)
         from modules.video_assembler import assemble_video
-        output_path = str(OUTPUT_DIR / f"video_{timestamp}.mp4")
+        output_path = str(OUTPUT_DIR / f"video_{language}_{timestamp}.mp4")
         assemble_video(audio_path, clips, srt_path, output_path, config)
 
         state["output"]  = output_path
@@ -275,13 +276,25 @@ with st.sidebar:
                                        help="Required for Trend Hunt. Get free key at console.cloud.google.com")
 
     with st.expander("🎙️  Voice Settings"):
+        st.markdown("**🇬🇧 English Voice**")
         voice_id = st.text_input(
-            "ElevenLabs Voice ID",
+            "ElevenLabs Voice ID (EN)",
             value=cfg.get("elevenlabs", {}).get("voice_id", "21m00Tcm4TlvDq8ikWAM"),
         )
         model_id = st.selectbox(
-            "Model",
+            "Model (EN)",
             ["eleven_monolingual_v1", "eleven_multilingual_v2", "eleven_turbo_v2"],
+            index=0,
+        )
+        st.markdown("**🇹🇷 Turkish Voice**")
+        tr_voice_id = st.text_input(
+            "ElevenLabs Voice ID (TR)",
+            value=cfg.get("elevenlabs_tr", {}).get("voice_id", ""),
+            placeholder="Multilingual voice ID for Turkish",
+        )
+        tr_model_id = st.selectbox(
+            "Model (TR)",
+            ["eleven_multilingual_v2", "eleven_turbo_v2"],
             index=0,
         )
 
@@ -306,7 +319,8 @@ with st.sidebar:
                 "pexels":     pexels_key.strip(),
                 "youtube":    youtube_key.strip(),
             },
-            "elevenlabs": {"voice_id": voice_id, "model_id": model_id},
+            "elevenlabs":    {"voice_id": voice_id,    "model_id": model_id},
+            "elevenlabs_tr": {"voice_id": tr_voice_id, "model_id": tr_model_id},
             "typography": {
                 "font":         font_name,
                 "font_size":    font_size,
@@ -365,10 +379,20 @@ with tab_gen:
             label_visibility="collapsed",
         )
 
-        # Content style selector
-        from modules.content_adapter import STYLE_PRESETS
-        _style_keys   = list(STYLE_PRESETS.keys())
-        _style_labels = [STYLE_PRESETS[k]["label"] for k in _style_keys]
+        # Language selector
+        lang_choice = st.radio(
+            "📺 Channel / Language",
+            ["🇬🇧 English", "🇹🇷 Türkçe"],
+            horizontal=True,
+            key="gen_lang",
+        )
+        selected_lang = "tr" if "Türkçe" in lang_choice else "en"
+
+        # Content style selector — show EN or TR presets based on language
+        from modules.content_adapter import STYLE_PRESETS, TR_STYLE_PRESETS
+        _active_presets = TR_STYLE_PRESETS if selected_lang == "tr" else STYLE_PRESETS
+        _style_keys   = list(_active_presets.keys())
+        _style_labels = [_active_presets[k]["label"] for k in _style_keys]
         _style_idx    = st.selectbox("Content Style", _style_labels, index=0, key="gen_style")
         selected_style = _style_keys[_style_labels.index(_style_idx)]
 
@@ -426,7 +450,7 @@ with tab_gen:
 
             t = threading.Thread(
                 target=_run_pipeline,
-                args=(topic.strip(), cfg_now, st.session_state.log_queue, pipeline_state, selected_style),
+                args=(topic.strip(), cfg_now, st.session_state.log_queue, pipeline_state, selected_style, selected_lang),
                 daemon=True,
             )
             t.start()
@@ -631,7 +655,7 @@ def _save_channels(data: dict) -> None:
 
 
 with tab_trend:
-    from modules.content_adapter import STYLE_PRESETS as _SP
+    from modules.content_adapter import STYLE_PRESETS as _SP, TR_STYLE_PRESETS as _TR_SP, ALL_PRESETS as _ALL_SP
 
     st.markdown("### \U0001f525 Trend Hunt — Competitor Intelligence")
     cfg_trend = load_config()
@@ -773,30 +797,45 @@ with tab_trend:
                     )
 
                     if vid["is_trending"]:
-                        btn_cols = st.columns([2, 2, 1])
+                        btn_cols = st.columns([1.5, 2, 2, 1])
                         with btn_cols[0]:
-                            _style_keys_r  = list(_SP.keys())
-                            _style_labels_r = [_SP[k]["label"] for k in _style_keys_r]
+                            _lang_choice = st.radio(
+                                "Lang", ["🇬🇧 EN", "🇹🇷 TR"],
+                                horizontal=True,
+                                key=f"lang_{vid['video_id']}",
+                                label_visibility="collapsed",
+                            )
+                            _vid_lang = "tr" if "TR" in _lang_choice else "en"
+
+                        with btn_cols[1]:
+                            _active_sp     = _TR_SP if _vid_lang == "tr" else _SP
+                            _style_keys_r  = list(_active_sp.keys())
+                            _style_labels_r = [_active_sp[k]["label"] for k in _style_keys_r]
                             default_niche = vid.get("niche", "dark_mystery")
-                            _default_idx  = _style_keys_r.index(default_niche) if default_niche in _style_keys_r else 0
+                            # map to TR variant if TR selected
+                            _tr_niche = f"{default_niche}_tr" if _vid_lang == "tr" else default_niche
+                            if _tr_niche not in _style_keys_r:
+                                _tr_niche = _style_keys_r[0]
+                            _default_idx  = _style_keys_r.index(_tr_niche) if _tr_niche in _style_keys_r else 0
                             chosen_label  = st.selectbox(
                                 "Style", _style_labels_r, index=_default_idx,
                                 key=f"style_{vid['video_id']}", label_visibility="collapsed"
                             )
                             chosen_style = _style_keys_r[_style_labels_r.index(chosen_label)]
 
-                        with btn_cols[1]:
-                            if st.button("\U0001f680  Produce Video", key=f"prod_{vid['video_id']}",
+                        with btn_cols[2]:
+                            if st.button("🚀  Produce Video", key=f"prod_{vid['video_id']}",
                                           use_container_width=True):
                                 st.session_state["trend_produce"] = {
                                     "video_id": vid["video_id"],
                                     "title":    vid["title"],
                                     "style":    chosen_style,
+                                    "language": _vid_lang,
                                 }
                                 st.rerun()
 
-                        with btn_cols[2]:
-                            st.link_button("\U0001f517 Open", vid["url"], use_container_width=True)
+                        with btn_cols[3]:
+                            st.link_button("🔗 Open", vid["url"], use_container_width=True)
 
             # Trigger production from trend ──────────────────────────────────
             if "trend_produce" in st.session_state and not st.session_state.running:
@@ -811,7 +850,7 @@ with tab_trend:
                 }
                 st.session_state.pipeline = pipeline_state
 
-                def _run_trend_produce(video_id, title, style, config, log_q, state):
+                def _run_trend_produce(video_id, title, style, language, config, log_q, state):
                     handler = QueueHandler(log_q)
                     handler.setFormatter(logging.Formatter(
                         "%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"
@@ -821,7 +860,7 @@ with tab_trend:
                     root_logger.setLevel(logging.INFO)
                     try:
                         from trend_pipeline import produce_from_video
-                        out = produce_from_video(video_id, title, style, config)
+                        out = produce_from_video(video_id, title, style, language, config)
                         state["output"]  = out
                         state["step"]    = 6
                         state["running"] = False
@@ -835,7 +874,7 @@ with tab_trend:
 
                 t2 = threading.Thread(
                     target=_run_trend_produce,
-                    args=(tp["video_id"], tp["title"], tp["style"],
+                    args=(tp["video_id"], tp["title"], tp["style"], tp.get("language", "en"),
                           cfg_trend, st.session_state.log_queue, pipeline_state),
                     daemon=True,
                 )

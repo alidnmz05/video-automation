@@ -8,8 +8,11 @@ ready-to-upload 9:16 short-form video from a single topic string.
 Usage:
     python run.py
     python run.py "car brake cut conspiracy"
+    python run.py --lang tr "karanlık bir olay"
+    python run.py --lang en --style conspiracy "NASA moon secrets"
 """
 
+import argparse
 import json
 import logging
 import os
@@ -69,11 +72,23 @@ def main() -> None:
 
     config = load_config()
 
-    # Topic: from CLI arg or interactive prompt
-    if len(sys.argv) > 1:
-        topic = " ".join(sys.argv[1:]).strip()
+    # CLI args
+    parser = argparse.ArgumentParser(description="AI Video Automator")
+    parser.add_argument("topic", nargs="*", help="Video topic")
+    parser.add_argument("--lang", choices=["en", "tr"], default="en",
+                        help="Output language: en (default) or tr")
+    parser.add_argument("--style", default=None,
+                        help="Content style preset (e.g. dark_mystery, conspiracy)")
+    args = parser.parse_args()
+
+    lang  = args.lang
+    style = args.style
+
+    if args.topic:
+        topic = " ".join(args.topic).strip()
     else:
-        topic = input("  Enter video topic (e.g. 'car brake cut conspiracy'): ").strip()
+        lang_hint = "(TR — Türkçe senaryo üretilecek) " if lang == "tr" else ""
+        topic = input(f"  Enter video topic {lang_hint}: ").strip()
 
     if not topic:
         logger.error("Topic cannot be empty.")
@@ -86,13 +101,14 @@ def main() -> None:
     os.makedirs(config["output_dir"], exist_ok=True)
 
     logger.info(f"Topic   : {topic}")
+    logger.info(f"Language: {lang.upper()}")
     logger.info(f"Session : {session_dir}")
 
     # ── Step 1: Script ────────────────────────────────────────────────────────
-    _step(1, "Generating script (GPT-4o)...")
+    _step(1, f"Generating script (GPT-4o) [{lang.upper()}]...")
     from modules.script_generator import generate_script
 
-    result = generate_script(topic, config["api_keys"]["openai"])
+    result = generate_script(topic, config["api_keys"]["openai"], language=lang)
     script: str = result["script"]
     keywords: list = result["keywords"]
 
@@ -104,15 +120,16 @@ def main() -> None:
         f.write(script)
 
     # ── Step 2: Voiceover ─────────────────────────────────────────────────────
-    _step(2, "Generating voiceover (ElevenLabs)...")
+    _step(2, f"Generating voiceover (ElevenLabs) [{lang.upper()}]...")
     from modules.voiceover import generate_voiceover
 
+    el_cfg = config.get("elevenlabs_tr", config["elevenlabs"]) if lang == "tr" else config["elevenlabs"]
     audio_path = generate_voiceover(
         script,
         session_dir,
         config["api_keys"]["elevenlabs"],
-        config["elevenlabs"]["voice_id"],
-        config["elevenlabs"]["model_id"],
+        el_cfg["voice_id"],
+        el_cfg["model_id"],
     )
 
     # ── Step 3: Subtitles ─────────────────────────────────────────────────────
@@ -138,7 +155,7 @@ def main() -> None:
     _step(5, "Assembling final video (MoviePy)...")
     from modules.video_assembler import assemble_video
 
-    output_filename = f"video_{timestamp}.mp4"
+    output_filename = f"video_{lang}_{timestamp}.mp4"
     output_path = os.path.join(config["output_dir"], output_filename)
 
     assemble_video(audio_path, stock_videos, srt_path, output_path, config)

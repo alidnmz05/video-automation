@@ -63,6 +63,8 @@ def main() -> None:
     parser.add_argument("--scan-only", action="store_true", help="Scan only, skip production")
     parser.add_argument("--video-id", type=str, help="Force-produce from a YouTube video ID")
     parser.add_argument("--style", type=str, default=None, help="Content style preset")
+    parser.add_argument("--lang", type=str, default=None, choices=["en", "tr"],
+                        help="Output language: en (English) or tr (Turkish)")
     args = parser.parse_args()
 
     config = load_config()
@@ -71,7 +73,9 @@ def main() -> None:
     yt_key = config["api_keys"].get("youtube", "").strip()
     threshold = channels_cfg["settings"].get("viral_threshold", 0.80)
     default_style = channels_cfg["settings"].get("default_style", "dark_mystery")
+    default_lang  = channels_cfg["settings"].get("default_lang", "en")
     style = args.style or default_style
+    lang  = args.lang  or default_lang
 
     if not yt_key and not args.video_id:
         logger.error(
@@ -81,11 +85,12 @@ def main() -> None:
 
     # ── Force mode ────────────────────────────────────────────────────────────
     if args.video_id:
-        logger.info(f"Force mode: producing from video {args.video_id}")
+        logger.info(f"Force mode: producing from video {args.video_id} [{lang.upper()}]")
         produce_from_video(
             args.video_id,
             title=f"YouTube/{args.video_id}",
             style=style,
+            language=lang,
             config=config,
         )
         return
@@ -154,7 +159,7 @@ def main() -> None:
 # ── Production helper (also called from app.py) ───────────────────────────────
 
 
-def produce_from_video(video_id: str, title: str, style: str, config: dict) -> str:
+def produce_from_video(video_id: str, title: str, style: str, language: str, config: dict) -> str:
     """
     Full adapter → production run for a single video.
 
@@ -162,6 +167,7 @@ def produce_from_video(video_id: str, title: str, style: str, config: dict) -> s
         video_id: YouTube video ID.
         title:    Original video title (context for GPT).
         style:    Content style preset key.
+        language: "en" (English) or "tr" (Turkish).
         config:   Loaded config dict.
 
     Returns:
@@ -186,8 +192,10 @@ def produce_from_video(video_id: str, title: str, style: str, config: dict) -> s
         logger.warning(f"Transcript unavailable ({exc}). Using title as context.")
         transcript = f"A video about: {title}"
 
-    # Rewrite
-    result = rewrite_for_shorts(transcript, title, config["api_keys"]["openai"], style)
+    # Rewrite → route by language
+    result = rewrite_for_shorts(
+        transcript, title, config["api_keys"]["openai"], style, language
+    )
     script = result["script"]
     keywords = result["keywords"]
 
@@ -195,16 +203,23 @@ def produce_from_video(video_id: str, title: str, style: str, config: dict) -> s
     logger.info(f"Keywords: {keywords}")
     (temp_dir / "script.txt").write_text(script, encoding="utf-8")
 
-    # Production pipeline (identical to run.py steps 2–5)
+    # Production pipeline — pick voice config by language
+    if language == "tr":
+        el_cfg = config.get("elevenlabs_tr", config["elevenlabs"])
+        lang_tag = "tr"
+    else:
+        el_cfg = config["elevenlabs"]
+        lang_tag = "en"
+
     audio_path = generate_voiceover(
         script, str(temp_dir),
         config["api_keys"]["elevenlabs"],
-        config["elevenlabs"]["voice_id"],
-        config["elevenlabs"]["model_id"],
+        el_cfg["voice_id"],
+        el_cfg["model_id"],
     )
     srt_path = generate_subtitles(audio_path, str(temp_dir), config["api_keys"]["openai"])
     clips = download_assets(keywords, str(temp_dir), config["api_keys"]["pexels"])
-    output_path = str(output_dir / f"trend_{style}_{timestamp}.mp4")
+    output_path = str(output_dir / f"trend_{lang_tag}_{style}_{timestamp}.mp4")
     assemble_video(audio_path, clips, srt_path, output_path, config)
 
     print(f"\n✅  Video ready: {output_path}\n")
