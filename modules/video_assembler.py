@@ -177,13 +177,15 @@ def _make_ambient_audio(duration: float, volume: float = 0.035):
 
 def _build_base_video(video_paths: list, total_duration: float, W: int, H: int):
     """
-    Load each stock clip, crop to 9:16, resize to (W, H), loop/trim to
-    an equal share of total_duration, then concatenate.
+    Load each stock clip, crop to 9:16, resize to (W, H), apply Ken Burns
+    zoom + cinematic color grade, crossfade between clips, then concatenate.
     """
-    n = len(video_paths)
-    clip_share = total_duration / n
+    CROSSFADE   = 0.4   # seconds overlap between clips
+    n           = len(video_paths)
+    clip_share  = total_duration / n
 
     processed = []
+    directions = ["in", "out", "in", "out"]  # alternate zoom direction per clip
     for i, path in enumerate(video_paths):
         logger.info(f"  Processing clip {i + 1}/{n}: {os.path.basename(path)}")
         try:
@@ -200,6 +202,18 @@ def _build_base_video(video_paths: list, total_duration: float, W: int, H: int):
             clip = concatenate_videoclips([clip] * loops)
 
         clip = clip.subclip(0, min(clip_share, clip.duration))
+
+        # Ken Burns: slow zoom
+        direction = directions[i % len(directions)]
+        clip = _apply_ken_burns(clip, W, H, direction=direction)
+
+        # Cinematic color grade
+        clip = _apply_color_grade(clip)
+
+        # Crossfade in (except first clip)
+        if i > 0 and clip.duration > CROSSFADE * 2:
+            clip = clip.crossfadein(CROSSFADE)
+
         processed.append(clip)
 
     if not processed:
@@ -210,14 +224,14 @@ def _build_base_video(video_paths: list, total_duration: float, W: int, H: int):
     if len(processed) < n:
         new_share = total_duration / len(processed)
         redistributed = []
-        for clip in processed:
+        for j, clip in enumerate(processed):
             if clip.duration < new_share:
                 loops = math.ceil(new_share / clip.duration)
                 clip = concatenate_videoclips([clip] * loops)
             redistributed.append(clip.subclip(0, new_share))
         processed = redistributed
 
-    return concatenate_videoclips(processed, method="compose")
+    return concatenate_videoclips(processed, method="compose", padding=-CROSSFADE)
 
 
 def _crop_to_ratio(clip, W: int, H: int):
@@ -238,6 +252,68 @@ def _crop_to_ratio(clip, W: int, H: int):
         new_h = int(clip.w / target_ratio)
         y1 = int((clip.h - new_h) / 2)
         return clip.crop(y1=y1, y2=y1 + new_h)
+
+
+def _apply_ken_burns(clip, W: int, H: int, direction: str = "in", zoom: float = 0.07):
+    """
+    Slowly zoom in or out over the clip's duration (Ken Burns effect).
+    `zoom` = total scale change (0.07 = 7% zoom over the full clip).
+    We pre-render to a slightly larger canvas so edges never appear after crop.
+    """
+    # Zoom from 1+zoom → 1.0 (out) or 1.0 → 1+zoom (in)
+    pad = 1.0 + zoom
+
+    def make_frame(t):
+        progress = t / max(clip.duration, 0.001)
+        if direction == "in":
+            scale = 1.0 + zoom * progress
+        else:
+            scale = pad - zoom * progress
+        # Get original frame
+        frame = clip.get_frame(t)          # (H, W, 3) uint8
+        img   = Image.fromarray(frame)
+        new_w = int(W * scale)
+        new_h = int(H * scale)
+        img   = img.resize((new_w, new_h), Image.LANCZOS)
+        # Centre-crop back to (W, H)
+        left  = (new_w - W) // 2
+        top   = (new_h - H) // 2
+        img   = img.crop((left, top, left + W, top + H))
+        return np.array(img)
+
+    return clip.fl(lambda gf, t: make_frame(t), apply_to="video")
+
+
+def _apply_color_grade(clip):
+    """
+    Cinematic dark color grade:
+      - Lift black point slightly (crush shadows warm)
+      - Add cold teal tint to shadows, warm orange to highlights
+      - Reduce overall brightness ~10 %
+    Processed per-frame via Pillow for simplicity.
+    """
+    def grade_frame(frame):          # frame: (H, W, 3) uint8 numpy
+        img    = frame.astype(np.float32) / 255.0
+        r, g, b = img[:,:,0], img[:,:,1], img[:,:,2]
+
+        # Luminance mask (0=shadows, 1=highlights)
+        lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        # Shadow teal push  (+0 R, +4 G, +10 B in shadows)
+        r = r + (-0.04) * (1 - lum)
+        g = g + ( 0.01) * (1 - lum)
+        b = b + ( 0.06) * (1 - lum)
+
+        # Highlight warm push (+8 R, +2 G, -4 B in highlights)
+        r = r + ( 0.05) * lum
+        g = g + ( 0.01) * lum
+        b = b + (-0.03) * lum
+
+        # Overall slight darkening
+        img = np.stack([r, g, b], axis=2) * 0.88
+        return np.clip(img * 255, 0, 255).astype(np.uint8)
+
+    return clip.fl_image(grade_frame)
 
 
 # ── Subtitle helpers ──────────────────────────────────────────────────────────
