@@ -1,0 +1,18 @@
+# API Keys - DO NOT COMMIT
+config.json
+
+# Generated content
+output/
+temp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
