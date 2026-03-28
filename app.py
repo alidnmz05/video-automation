@@ -169,7 +169,7 @@ STEP_NAMES = [
 ]
 
 
-def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict) -> None:
+def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, style: str = "dark_mystery") -> None:
     """
     Runs the full 5-step pipeline in a background thread.
     Writes progress into `state` dict and logs into `log_q`.
@@ -271,6 +271,8 @@ with st.sidebar:
         openai_key     = st.text_input("OpenAI Key",     value=cfg.get("api_keys", {}).get("openai", ""),     type="password", key="s_oai")
         elevenlabs_key = st.text_input("ElevenLabs Key", value=cfg.get("api_keys", {}).get("elevenlabs", ""), type="password", key="s_el")
         pexels_key     = st.text_input("Pexels Key",     value=cfg.get("api_keys", {}).get("pexels", ""),     type="password", key="s_px")
+        youtube_key    = st.text_input("YouTube Data API Key", value=cfg.get("api_keys", {}).get("youtube", ""), type="password", key="s_yt",
+                                       help="Required for Trend Hunt. Get free key at console.cloud.google.com")
 
     with st.expander("🎙️  Voice Settings"):
         voice_id = st.text_input(
@@ -302,6 +304,7 @@ with st.sidebar:
                 "openai":     openai_key.strip(),
                 "elevenlabs": elevenlabs_key.strip(),
                 "pexels":     pexels_key.strip(),
+                "youtube":    youtube_key.strip(),
             },
             "elevenlabs": {"voice_id": voice_id, "model_id": model_id},
             "typography": {
@@ -344,7 +347,7 @@ st.markdown(
 
 # ── Main tabs ─────────────────────────────────────────────────────────────────
 
-tab_gen, tab_history, tab_preview = st.tabs(["⚡  Generate", "📂  History", "▶️  Preview"])
+tab_gen, tab_trend, tab_history, tab_preview = st.tabs(["⚡  Generate", "🔥  Trend Hunt", "📂  History", "▶️  Preview"])
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Generate
@@ -361,6 +364,13 @@ with tab_gen:
             height=120,
             label_visibility="collapsed",
         )
+
+        # Content style selector
+        from modules.content_adapter import STYLE_PRESETS
+        _style_keys   = list(STYLE_PRESETS.keys())
+        _style_labels = [STYLE_PRESETS[k]["label"] for k in _style_keys]
+        _style_idx    = st.selectbox("Content Style", _style_labels, index=0, key="gen_style")
+        selected_style = _style_keys[_style_labels.index(_style_idx)]
 
         # Quick-idea chips
         st.markdown("**Quick ideas:**")
@@ -416,7 +426,7 @@ with tab_gen:
 
             t = threading.Thread(
                 target=_run_pipeline,
-                args=(topic.strip(), cfg_now, st.session_state.log_queue, pipeline_state),
+                args=(topic.strip(), cfg_now, st.session_state.log_queue, pipeline_state, selected_style),
                 daemon=True,
             )
             t.start()
@@ -601,3 +611,235 @@ with tab_preview:
 
             with open(p, "rb") as vf:
                 st.download_button("⬇️  Download this video", data=vf, file_name=p.name, mime="video/mp4", use_container_width=True)
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Trend Hunt
+# ════════════════════════════════════════════════════════════════════════════
+CHANNELS_FILE = Path(__file__).parent / "channels.json"
+
+
+def _load_channels() -> dict:
+    if CHANNELS_FILE.exists():
+        with open(CHANNELS_FILE) as f:
+            return json.load(f)
+    return {"channels": [], "settings": {}}
+
+
+def _save_channels(data: dict) -> None:
+    with open(CHANNELS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+with tab_trend:
+    from modules.content_adapter import STYLE_PRESETS as _SP
+
+    st.markdown("### \U0001f525 Trend Hunt — Competitor Intelligence")
+    cfg_trend = load_config()
+    yt_key = cfg_trend.get("api_keys", {}).get("youtube", "").strip()
+
+    ch_data = _load_channels()
+
+    col_ch, col_scan = st.columns([1, 2], gap="large")
+
+    # ── Left: channel management ─────────────────────────────────────────────
+    with col_ch:
+        st.markdown("#### \U0001f4e1 Monitored Channels")
+
+        for i, ch in enumerate(ch_data["channels"]):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                niche_label = _SP.get(ch.get("niche", "dark_mystery"), {}).get("label", ch.get("niche", ""))
+                st.markdown(f"**{ch['name']}**  \n`{niche_label}`")
+            with c2:
+                if st.button("\u2715", key=f"rm_ch_{i}", help="Remove channel"):
+                    ch_data["channels"].pop(i)
+                    _save_channels(ch_data)
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown("**Add a channel:**")
+        new_ch_id    = st.text_input("Channel ID",   key="new_ch_id",    placeholder="UCxxxxxxxxxxxxxxxx")
+        new_ch_name  = st.text_input("Display name", key="new_ch_name",  placeholder="e.g. MrBallen")
+        _style_keys_t  = list(_SP.keys())
+        _style_labels_t = [_SP[k]["label"] for k in _style_keys_t]
+        new_ch_niche_label = st.selectbox("Content style", _style_labels_t, key="new_ch_niche")
+        new_ch_niche = _style_keys_t[_style_labels_t.index(new_ch_niche_label)]
+
+        if st.button("\u2795  Add Channel", use_container_width=True):
+            if new_ch_id.strip() and new_ch_name.strip():
+                ch_data["channels"].append({
+                    "id":    new_ch_id.strip(),
+                    "name":  new_ch_name.strip(),
+                    "niche": new_ch_niche,
+                })
+                _save_channels(ch_data)
+                st.success(f"Added: {new_ch_name}")
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("**Scan settings:**")
+        new_threshold = st.slider(
+            "Viral score threshold", 0.50, 1.0,
+            float(ch_data["settings"].get("viral_threshold", 0.80)), 0.05,
+        )
+        new_vph_ratio = st.slider(
+            "VPH alert ratio", 1.0, 5.0,
+            float(ch_data["settings"].get("vph_alert_ratio", 1.5)), 0.1,
+        )
+        if st.button("\U0001f4be  Save scan settings", use_container_width=True):
+            ch_data["settings"]["viral_threshold"] = new_threshold
+            ch_data["settings"]["vph_alert_ratio"] = new_vph_ratio
+            _save_channels(ch_data)
+            st.success("Saved!")
+
+    # ── Right: scan results ───────────────────────────────────────────────────
+    with col_scan:
+        st.markdown("#### \U0001f4ca Scan Results")
+
+        if not yt_key or yt_key.startswith("YOUR_"):
+            st.warning(
+                "\u26a0\ufe0f  Add your **YouTube Data API v3 key** in the sidebar and save settings.  \n"
+                "Get a free key at [console.cloud.google.com](https://console.cloud.google.com/) "
+                "(enable YouTube Data API v3, create an API key)."
+            )
+        else:
+            scan_btn = st.button("\U0001f50d  Scan Channels Now", use_container_width=True,
+                                  disabled=not ch_data["channels"])
+
+            if scan_btn:
+                with st.spinner("Scanning competitor channels..."):
+                    try:
+                        from modules.trend_detector import scan_channels, get_top_comments
+                        from modules.viral_scorer import calculate_viral_score
+
+                        raw_results = scan_channels(
+                            ch_data["channels"], yt_key,
+                            vph_threshold_ratio=ch_data["settings"].get("vph_alert_ratio", 1.5),
+                        )
+
+                        # Score trending videos
+                        for vid in raw_results:
+                            if vid["is_trending"]:
+                                comments = get_top_comments(vid["video_id"], yt_key, 20)
+                                vid["scores"] = calculate_viral_score(
+                                    views=vid["views"],
+                                    likes=vid["likes"],
+                                    comments_count=vid["comments"],
+                                    vph_ratio=vid["vph_ratio"],
+                                    comment_texts=comments,
+                                )
+
+                        st.session_state["trend_results"] = raw_results
+                    except Exception as exc:
+                        st.error(f"Scan failed: {exc}")
+
+            results = st.session_state.get("trend_results", [])
+
+            if results:
+                trending_count = sum(1 for r in results if r["is_trending"])
+                st.markdown(f"**{len(results)} videos scanned · {trending_count} trending \U0001f525**")
+
+                for vid in results:
+                    scores  = vid.get("scores")
+                    v_score = scores["viral_score"] if scores else None
+                    decision = scores["decision"]  if scores else ""
+
+                    if vid["is_trending"]:
+                        border = "#ff3300"
+                        badge  = f"\U0001f525 TREND · Viral {v_score:.2f}" if v_score else "\U0001f525 TREND"
+                    else:
+                        border = "#333"
+                        badge  = f"VPH ratio {vid['vph_ratio']:.2f}x"
+
+                    st.markdown(
+                        f"""
+                        <div style="border:1px solid {border};border-radius:10px;
+                                    padding:14px 18px;margin:8px 0;background:#1a1a1a">
+                          <div style="display:flex;justify-content:space-between;align-items:center">
+                            <div>
+                              <b style="color:#e0e0e0">{vid['title'][:70]}</b><br>
+                              <span style="color:#888;font-size:0.85rem">
+                                {vid['channel_name']} &nbsp;·&nbsp;
+                                {vid['views']:,} views &nbsp;·&nbsp;
+                                {vid['age_hours']:.1f}h old &nbsp;·&nbsp;
+                                VPH {vid['vph']:.0f}
+                              </span>
+                            </div>
+                            <span style="color:{border};font-weight:bold;font-size:0.85rem">{badge}</span>
+                          </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    if vid["is_trending"]:
+                        btn_cols = st.columns([2, 2, 1])
+                        with btn_cols[0]:
+                            _style_keys_r  = list(_SP.keys())
+                            _style_labels_r = [_SP[k]["label"] for k in _style_keys_r]
+                            default_niche = vid.get("niche", "dark_mystery")
+                            _default_idx  = _style_keys_r.index(default_niche) if default_niche in _style_keys_r else 0
+                            chosen_label  = st.selectbox(
+                                "Style", _style_labels_r, index=_default_idx,
+                                key=f"style_{vid['video_id']}", label_visibility="collapsed"
+                            )
+                            chosen_style = _style_keys_r[_style_labels_r.index(chosen_label)]
+
+                        with btn_cols[1]:
+                            if st.button("\U0001f680  Produce Video", key=f"prod_{vid['video_id']}",
+                                          use_container_width=True):
+                                st.session_state["trend_produce"] = {
+                                    "video_id": vid["video_id"],
+                                    "title":    vid["title"],
+                                    "style":    chosen_style,
+                                }
+                                st.rerun()
+
+                        with btn_cols[2]:
+                            st.link_button("\U0001f517 Open", vid["url"], use_container_width=True)
+
+            # Trigger production from trend ──────────────────────────────────
+            if "trend_produce" in st.session_state and not st.session_state.running:
+                tp = st.session_state.pop("trend_produce")
+                st.session_state.running   = True
+                st.session_state.log_lines = []
+                st.session_state.log_queue = queue.Queue()
+                pipeline_state = {
+                    "running": True, "step": 0,
+                    "script": None, "keywords": [],
+                    "output": None, "error": None,
+                }
+                st.session_state.pipeline = pipeline_state
+
+                def _run_trend_produce(video_id, title, style, config, log_q, state):
+                    handler = QueueHandler(log_q)
+                    handler.setFormatter(logging.Formatter(
+                        "%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S"
+                    ))
+                    root_logger = logging.getLogger()
+                    root_logger.addHandler(handler)
+                    root_logger.setLevel(logging.INFO)
+                    try:
+                        from trend_pipeline import produce_from_video
+                        out = produce_from_video(video_id, title, style, config)
+                        state["output"]  = out
+                        state["step"]    = 6
+                        state["running"] = False
+                        log_q.put("\u2705  Done!")
+                    except Exception as exc:
+                        state["error"]   = str(exc)
+                        state["running"] = False
+                        log_q.put(f"\u274c  {exc}")
+                    finally:
+                        root_logger.removeHandler(handler)
+
+                t2 = threading.Thread(
+                    target=_run_trend_produce,
+                    args=(tp["video_id"], tp["title"], tp["style"],
+                          cfg_trend, st.session_state.log_queue, pipeline_state),
+                    daemon=True,
+                )
+                t2.start()
+                st.session_state.thread = t2
+                st.info(f"\U0001f680 Producing video from: **{tp['title'][:60]}**  \nWatch progress in the **\u26a1 Generate** tab.")
+                st.rerun()

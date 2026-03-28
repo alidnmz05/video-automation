@@ -1,0 +1,46 @@
+{
+  "channels": [
+    {
+      "id": "UCsqjHFMB_JYTaEnf_vmTNqg",
+      "name": "Kyle Hill",
+      "niche": "dark_mystery"
+    },
+    {
+      "id": "UCVTyTA7-g9nopHeHbeuvpRA",
+      "name": "LEMMiNO",
+      "niche": "dark_mystery"
+    },
+    {
+      "id": "UCee5MU5pzrBBr_WPXpRRMVg",
+      "name": "Wendover Productions",
+      "niche": "educational"
+    },
+    {
+      "id": "UC9-y-6csu5WGm29I7JiwpnA",
+      "name": "Computerphile",
+      "niche": "tech_explained"
+    },
+    {
+      "id": "UCHnyfMqiRRG1u-2MsSQLbXA",
+      "name": "Veritasium",
+      "niche": "educational"
+    },
+    {
+      "id": "UCMiJRAwDNSNzuYeN2uWa0pA",
+      "name": "Mrwhosetheboss",
+      "niche": "tech_explained"
+    },
+    {
+      "id": "UCpB959t8iPrxQWj7G6n0ctQ",
+      "name": "MrBallen",
+      "niche": "true_crime"
+    }
+  ],
+  "settings": {
+    "check_interval_hours": 3,
+    "viral_threshold": 0.8,
+    "vph_alert_ratio": 1.5,
+    "vph_window_hours": 12,
+    "default_style": "dark_mystery"
+  }
+}
