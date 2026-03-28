@@ -5,3 +5,4 @@ Pillow>=10.0.0
 numpy>=1.24.0
 srt>=3.5.3
 imageio-ffmpeg>=0.4.9
+streamlit>=1.30.0
