@@ -168,10 +168,28 @@ STEP_NAMES = [
     "Assembling final video (MoviePy)",
 ]
 
+STEP_NAMES_CUSTOM = [
+    "Script provided by user ✍️",
+    "Generating voiceover (ElevenLabs)",
+    "Generating subtitles (Whisper)",
+    "Downloading stock videos (Pexels)",
+    "Assembling final video (MoviePy)",
+]
 
-def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, style: str = "dark_mystery", language: str = "en") -> None:
+
+def _run_pipeline(
+    topic: str,
+    config: dict,
+    log_q: queue.Queue,
+    state: dict,
+    style: str = "dark_mystery",
+    language: str = "en",
+    custom_script: str = "",
+    preset_keywords: list = None,
+) -> None:
     """
     Runs the full 5-step pipeline in a background thread.
+    If custom_script is provided, Step 1 (GPT-4o) is skipped.
     Writes progress into `state` dict and logs into `log_q`.
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -185,19 +203,28 @@ def _run_pipeline(topic: str, config: dict, log_q: queue.Queue, state: dict, sty
     root_logger.addHandler(handler)
     root_logger.setLevel(logging.INFO)
 
+    _names = STEP_NAMES_CUSTOM if custom_script else STEP_NAMES
+
     def step(n: int) -> None:
         state["step"] = n
         log_q.put(f"{'─'*48}")
-        log_q.put(f"▶  STEP {n}/5 — {STEP_NAMES[n - 1]}")
+        log_q.put(f"▶  STEP {n}/5 — {_names[n - 1]}")
         log_q.put(f"{'─'*48}")
 
     try:
-        # Step 1 — Script
+        # Step 1 — Script (skip if custom script provided)
         step(1)
-        from modules.script_generator import generate_script
-        result   = generate_script(topic, config["api_keys"]["openai"], language=language)
-        script   = result["script"]
-        keywords = result["keywords"]
+        if custom_script.strip():
+            script   = custom_script.strip()
+            # Use manually provided keywords, fallback to topic words
+            keywords = preset_keywords if preset_keywords else [w for w in topic.split() if len(w) > 3][:5] or [topic]
+            log_q.put(f"✍️  Using custom script ({len(script)} chars)")
+            log_q.put(f"🔍  Pexels keywords: {keywords}")
+        else:
+            from modules.script_generator import generate_script
+            result   = generate_script(topic, config["api_keys"]["openai"], language=language)
+            script   = result["script"]
+            keywords = result["keywords"]
         (session_dir / "script.txt").write_text(script, encoding="utf-8")
         state["script"]   = script
         state["keywords"] = keywords
@@ -371,13 +398,46 @@ with tab_gen:
 
     # ── Left: input ──────────────────────────────────────────────────────────
     with col_left:
-        st.markdown("### 📝 Video Topic")
-        topic = st.text_area(
-            "Describe your story idea",
-            placeholder="e.g. The mysterious red room on the dark web…",
-            height=120,
-            label_visibility="collapsed",
+        # ── Script Mode Toggle ─────────────────────────────────────────────
+        script_mode = st.radio(
+            "✍️ Script Mode",
+            ["🤖 AI Writes the Script", "✍️ I'll Write the Script"],
+            horizontal=True,
+            key="script_mode",
         )
+        use_custom = "I'll Write" in script_mode
+
+        if use_custom:
+            st.markdown("### ✍️ Your Script")
+            custom_script_text = st.text_area(
+                "Paste or type your full script here",
+                placeholder="Metni buraya yapıştır. Her cümle kısa ve güçlü olsun.",
+                height=220,
+                label_visibility="collapsed",
+                key="custom_script_text",
+            )
+            st.markdown("### 🔍 Keywords for Stock Video (Pexels)")
+            keywords_input = st.text_input(
+                "Comma separated English keywords",
+                placeholder="dark alley, hacker, mystery, car crash",
+                label_visibility="collapsed",
+                key="custom_keywords",
+            )
+            topic = st.text_input(
+                "Short topic label (for filename)",
+                placeholder="e.g. nasa secrets",
+                key="custom_topic_label",
+            )
+        else:
+            st.markdown("### 📝 Video Topic")
+            custom_script_text = ""
+            keywords_input = ""
+            topic = st.text_area(
+                "Describe your story idea",
+                placeholder="e.g. The mysterious red room on the dark web…",
+                height=120,
+                label_visibility="collapsed",
+            )
 
         # Language selector
         lang_choice = st.radio(
@@ -412,29 +472,32 @@ with tab_gen:
                     st.session_state["_injected_topic"] = idea
                     st.rerun()
 
-        # Apply injected topic from chip click
-        if "_injected_topic" in st.session_state:
+        # Apply injected topic from chip click (only in AI mode)
+        if not use_custom and "_injected_topic" in st.session_state:
             topic = st.session_state.pop("_injected_topic")
 
         st.markdown("---")
 
         # Validate before allowing generation
         cfg_now = load_config()
-        keys_ok = all(
-            cfg_now.get("api_keys", {}).get(k)
-            for k in ("openai", "elevenlabs", "pexels")
-        )
+        _required_keys = ("elevenlabs", "pexels") if use_custom else ("openai", "elevenlabs", "pexels")
+        keys_ok = all(cfg_now.get("api_keys", {}).get(k) for k in _required_keys)
 
         if not keys_ok:
             st.warning("⚠️  Fill in all API keys in the sidebar and click **Save Settings**.")
 
+        _ready = topic.strip() and (custom_script_text.strip() if use_custom else True)
         generate_btn = st.button(
             "🚀  Generate Video",
             use_container_width=True,
-            disabled=st.session_state.running or not keys_ok or not topic.strip(),
+            disabled=st.session_state.running or not keys_ok or not _ready,
         )
 
         if generate_btn:
+            # Build Pexels keywords from manual input or fallback to topic words
+            _custom_kw = [k.strip() for k in keywords_input.split(",") if k.strip()] if use_custom and keywords_input else []
+            _final_custom_script = custom_script_text if use_custom else ""
+
             st.session_state.running   = True
             st.session_state.log_lines = []
             st.session_state.log_queue = queue.Queue()
@@ -442,7 +505,7 @@ with tab_gen:
                 "running": True,
                 "step":    0,
                 "script":  None,
-                "keywords": [],
+                "keywords": _custom_kw,
                 "output":  None,
                 "error":   None,
             }
@@ -450,7 +513,7 @@ with tab_gen:
 
             t = threading.Thread(
                 target=_run_pipeline,
-                args=(topic.strip(), cfg_now, st.session_state.log_queue, pipeline_state, selected_style, selected_lang),
+                args=(topic.strip() or "custom", cfg_now, st.session_state.log_queue, pipeline_state, selected_style, selected_lang, _final_custom_script, _custom_kw or None),
                 daemon=True,
             )
             t.start()
@@ -880,5 +943,7 @@ with tab_trend:
                 )
                 t2.start()
                 st.session_state.thread = t2
-                st.info(f"\U0001f680 Producing video from: **{tp['title'][:60]}**  \nWatch progress in the **\u26a1 Generate** tab.")
+                st.toast(f"🚀 Producing trend video: {tp['title'][:30]}...", icon="🎬")
+                st.info(f"🚀 Producing video from: **{tp['title'][:60]}**  \nWatch progress in the **⚡ Generate** tab.")
+                time.sleep(2) # Give it a moment to show the info
                 st.rerun()

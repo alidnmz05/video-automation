@@ -18,8 +18,10 @@ import numpy as np
 import srt as srtlib
 from PIL import Image, ImageDraw, ImageFont, ImageColor
 from moviepy.editor import (
+    AudioArrayClip,
     AudioFileClip,
     ColorClip,
+    CompositeAudioClip,
     CompositeVideoClip,
     ImageClip,
     VideoFileClip,
@@ -77,6 +79,10 @@ def assemble_video(
         .set_opacity(overlay_opacity)
     )
 
+    # ── 3b. Vignette (cinematic edge darkening) ───────────────────────────────
+    logger.info("Building vignette overlay...")
+    vignette = _build_vignette_clip(W, H, total_duration, strength=0.80)
+
     # ── 4. Subtitle clips ─────────────────────────────────────────────────────
     logger.info("Rendering subtitle clips...")
     font_path = _find_font(config["typography"]["font"])
@@ -86,10 +92,22 @@ def assemble_video(
     # ── 5. Composite & export ─────────────────────────────────────────────────
     logger.info("Compositing layers...")
     final = CompositeVideoClip(
-        [base_video, overlay] + subtitle_clips,
+        [base_video, overlay, vignette] + subtitle_clips,
         size=(W, H),
     )
-    final = final.set_audio(audio).set_duration(total_duration)
+
+    # ── 5b. Mix ambient audio (brown-noise rumble) ────────────────────────────
+    ambient_volume = float(config.get("video", {}).get("ambient_volume", 0.035))
+    if ambient_volume > 0:
+        ambient = _make_ambient_audio(total_duration, volume=ambient_volume)
+        if ambient:
+            logger.info("Mixing ambient audio layer...")
+            mixed_audio = CompositeAudioClip([audio, ambient])
+            final = final.set_audio(mixed_audio).set_duration(total_duration)
+        else:
+            final = final.set_audio(audio).set_duration(total_duration)
+    else:
+        final = final.set_audio(audio).set_duration(total_duration)
 
     logger.info(f"Exporting → {output_path}")
     final.write_videofile(
@@ -106,6 +124,52 @@ def assemble_video(
     final.close()
 
     return output_path
+
+
+# ── Vignette & ambient audio helpers ─────────────────────────────────────────
+
+
+def _build_vignette_clip(W: int, H: int, duration: float, strength: float = 0.80):
+    """
+    Radial edge-darkening vignette overlay.
+    Generates a pure-black RGBA image where only the alpha channel varies:
+    transparent at centre → opaque at corners.  Gives a cinematic look.
+    """
+    xs = np.linspace(-1, 1, W, dtype=np.float32)
+    ys = np.linspace(-1, 1, H, dtype=np.float32)
+    xv, yv = np.meshgrid(xs, ys)
+    # Elliptical (compensate for 9:16 aspect)
+    dist = np.sqrt(xv ** 2 + (yv * 0.55) ** 2)
+    alpha_f = np.clip((dist * strength) ** 2.0, 0.0, 1.0)
+    rgba = np.zeros((H, W, 4), dtype=np.uint8)
+    rgba[:, :, 3] = (alpha_f * 230).astype(np.uint8)
+    return ImageClip(rgba, ismask=False).set_duration(duration)
+
+
+def _make_ambient_audio(duration: float, volume: float = 0.035):
+    """
+    Generate brown noise (low-frequency rumble / atmosphere) as a MoviePy
+    AudioArrayClip.  Returns None if creation fails so the pipeline degrades
+    gracefully.
+    """
+    try:
+        sr  = 44100
+        n   = int(duration * sr)
+        rng = np.random.default_rng(seed=42)
+        white = rng.standard_normal(n).astype(np.float32)
+        brown = np.cumsum(white)
+        peak  = np.max(np.abs(brown))
+        if peak > 0:
+            brown = brown / peak * volume
+        # Soft fade-in / fade-out to avoid clicks
+        fade = min(sr, n // 10)
+        brown[:fade]  *= np.linspace(0, 1, fade)
+        brown[-fade:] *= np.linspace(1, 0, fade)
+        stereo = np.column_stack([brown, brown])
+        return AudioArrayClip(stereo, fps=sr)
+    except Exception as exc:
+        logger.warning(f"Ambient audio skipped: {exc}")
+        return None
 
 
 # ── Base video helpers ────────────────────────────────────────────────────────
@@ -216,31 +280,45 @@ def _render_text_frame(
 ) -> np.ndarray:
     """
     Render a single subtitle line onto a transparent RGBA canvas using Pillow.
+    Enhancements vs. v1:
+      - Semi-transparent pill (rounded rectangle) behind each subtitle.
+      - ALL-CAPS words (3+ chars) trigger accent-yellow colouring for emphasis.
     Returns a numpy array suitable for MoviePy's ImageClip.
     """
-    font_size: int = typography["font_size"]
-    color: str = typography["font_color"]
-    stroke_color: str = typography["stroke_color"]
-    stroke_width: int = typography["stroke_width"]
+    font_size: int  = typography["font_size"]
+    color: str      = typography["font_color"]
+    stroke_color: str  = typography["stroke_color"]
+    stroke_width: int  = typography["stroke_width"]
 
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    img  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Load font
     font = _load_font(font_path, font_size)
 
-    # Parse named colours → RGBA tuples
-    main_rgba = _to_rgba(color)
+    # Accent: if ANY word is fully uppercase (3+ chars), highlight the line
+    has_emphasis = any(w.isupper() and len(w) >= 3 for w in text.split())
+    main_rgba   = (255, 214, 0, 255) if has_emphasis else _to_rgba(color)
     stroke_rgba = _to_rgba(stroke_color)
 
-    # Centre the text horizontally, place at 75 % height
-    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    bbox   = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
 
     x = (W - text_w) / 2 - bbox[0]
-    y = H * 0.75 - text_h / 2 - bbox[1]
+    y = H * 0.75  - text_h / 2  - bbox[1]
 
+    # ── Pill background (semi-transparent black rounded rect) ──────────────
+    pad_x, pad_y = 36, 16
+    rx0 = max(0, int(x + bbox[0] - pad_x))
+    ry0 = max(0, int(y + bbox[1] - pad_y))
+    rx1 = min(W, int(x + bbox[2] + pad_x))
+    ry1 = min(H, int(y + bbox[3] + pad_y))
+    try:
+        draw.rounded_rectangle([rx0, ry0, rx1, ry1], radius=16, fill=(0, 0, 0, 155))
+    except AttributeError:          # Pillow < 8.2 fallback (shouldn't happen)
+        draw.rectangle([rx0, ry0, rx1, ry1], fill=(0, 0, 0, 155))
+
+    # ── Text ──────────────────────────────────────────────────────────────────
     draw.text(
         (x, y),
         text,
